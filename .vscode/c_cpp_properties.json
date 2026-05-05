@@ -6,18 +6,13 @@
         "limitSymbolsToIncludedHeaders": false
       },
       "includePath": [
-        "/opt/ros/humble/include/**",
-        "/workspace/src/gomoku_core/include/**",
-        "/workspace/src/gomoku_player/include/**",
-        "/workspace/src/gomoku_robot/include/**",
-        "/workspace/src/gomoku_server/include/**",
-        "/usr/include/**"
+        "${workspaceFolder}/**"
       ],
-      "name": "ROS",
-      "intelliSenseMode": "gcc-x64",
-      "compilerPath": "/usr/bin/gcc",
-      "cStandard": "gnu11",
-      "cppStandard": "c++17"
+      "name": "macos-clang-arm64",
+      "intelliSenseMode": "macos-clang-arm64",
+      "compilerPath": "/usr/bin/clang",
+      "cStandard": "${default}",
+      "cppStandard": "${default}"
     }
   ],
   "version": 4
