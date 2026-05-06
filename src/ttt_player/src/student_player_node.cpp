@@ -3,10 +3,8 @@
 #include <chrono>
 #include <cmath>
 #include <functional>
-#include <future>
 #include <memory>
 #include <optional>
-#include <stdexcept>
 #include <string>
 #include <unordered_set>
 #include <utility>
@@ -172,47 +170,22 @@ class StudentPlayerNode : public rclcpp::Node {
   std::optional<std::vector<double>> compute_ik(
       const geometry_msgs::msg::Pose &target_pose,
       const std::vector<double> &seed_positions) {
+    (void)target_pose;
+    (void)seed_positions;
 
-    auto request = std::make_shared<moveit_msgs::srv::GetPositionIK::Request>();
-    request->ik_request.group_name = "panda_arm";
-    request->ik_request.robot_state.joint_state.name = panda_joint_names();
-    request->ik_request.robot_state.joint_state.position = seed_positions;
-    request->ik_request.pose_stamped.header.frame_id = "panda_link0";
-    request->ik_request.pose_stamped.pose = target_pose;
-    request->ik_request.timeout.sec = 5;
-    request->ik_request.avoid_collisions = false;
-
-    if (!ik_client_->wait_for_service(1s)) {
-      RCLCPP_ERROR(this->get_logger(), "IK service not available");
-      return std::nullopt;
-    }
-
-    auto future = ik_client_->async_send_request(request);
-    if (future.wait_for(10s) != std::future_status::ready) {
-      RCLCPP_ERROR(this->get_logger(), "IK service timeout");
-      return std::nullopt;
-    }
-
-    auto response = future.get();
-    if (response->error_code.val != moveit_msgs::msg::MoveItErrorCodes::SUCCESS) {
-      RCLCPP_ERROR(this->get_logger(), "IK failed with error code %d", response->error_code.val);
-      return std::nullopt;
-    }
-
-    std::vector<double> result;
-    result.reserve(7);
-    const auto& names = response->solution.joint_state.name;
-    const auto& positions = response->solution.joint_state.position;
-    for (const auto& target_name : panda_joint_names()) {
-      auto it = std::find(names.begin(), names.end(), target_name);
-      if (it != names.end()) {
-        auto index = std::distance(names.begin(), it);
-        result.push_back(positions[index]);
-      } else {
-        return std::nullopt;
-      }
-    }
-    return result;
+    // TODO(student): Call the MoveIt `/compute_ik` service here.
+    // Suggested steps:
+    // 1. Create a `moveit_msgs::srv::GetPositionIK::Request`.
+    // 2. Set `group_name = "panda_arm"`.
+    // 3. Fill the seed joint state with the provided `seed_positions`.
+    // 4. Set the target pose in frame `panda_link0`.
+    // 5. Send the request through `ik_client_` and wait for the response.
+    // 6. Extract the 7 Panda arm joints from the solution and return them.
+    // 7. Return `std::nullopt` if IK times out or fails.
+    //
+    // The dummy return below keeps the starter code buildable, but it does not
+    // solve IK. Students should replace it with a real implementation.
+    return std::nullopt;
   }
 
   // ----------------------------------------------------------------
@@ -228,87 +201,41 @@ class StudentPlayerNode : public rclcpp::Node {
       return;
     }
 
-    uint8_t target_cell_id = 255;
-    for (size_t i = 0; i < request->snapshot.legal_actions.size(); ++i) {
-      if (request->snapshot.legal_actions[i] == 1) {
-        target_cell_id = static_cast<uint8_t>(i);
-        break;
-      }
-    }
-
-    uint8_t target_piece_id = 255;
-    for (const auto& piece : request->snapshot.pieces) {
-      if (piece.owner == player_id_ && piece.available) {
-        target_piece_id = piece.piece_id;
-        break;
-      }
-    }
-
-    if (target_cell_id == 255 || target_piece_id == 255) {
-      response->accepted = false;
-      response->message = "No legal moves available.";
-      return;
-    }
-
-    geometry_msgs::msg::Pose piece_pose;
-    try {
-      piece_pose = find_piece_pose(request->snapshot, request->layout, target_piece_id);
-    } catch (const std::exception& e) {
-      response->accepted = false;
-      response->message = e.what();
-      return;
-    }
-
-    geometry_msgs::msg::Pose cell_pose = request->layout.cell_poses[target_cell_id];
-
-    auto pick_target = link8_pose_from_tcp_target(piece_pose.position.x, piece_pose.position.y, piece_pose.position.z);
-    auto place_target = link8_pose_from_tcp_target(cell_pose.position.x, cell_pose.position.y, cell_pose.position.z);
-
-    auto pick_goal = compute_ik(pick_target, kHomePositions);
-    if (!pick_goal) {
-      response->accepted = false;
-      response->message = "IK failed for pick target.";
-      return;
-    }
-
-    auto place_goal = compute_ik(place_target, kHomePositions);
-    if (!place_goal) {
-      response->accepted = false;
-      response->message = "IK failed for place target.";
-      return;
-    }
-
-    ttt_interfaces::msg::TurnPlan plan;
-    plan.match_id = request->match_id;
-    plan.turn_index = request->turn_index;
-    plan.player_id = request->player_id;
-    plan.piece_id = target_piece_id;
-    plan.cell_id = target_cell_id;
-    plan.home_to_pick = make_three_point_trajectory(kHomePositions, *pick_goal, 1.5);
-    plan.pick_to_home = make_three_point_trajectory(*pick_goal, kHomePositions, 1.5);
-    plan.home_to_place = make_three_point_trajectory(kHomePositions, *place_goal, 1.5);
-    plan.place_to_home = make_three_point_trajectory(*place_goal, kHomePositions, 1.5);
-
-    response->plan = plan;
-    response->accepted = true;
-    response->message = "Plan accepted.";
+    // TODO(student): Implement your turn-planning logic here.
+    // Suggested structure:
+    // 1. Choose a legal `(piece_id, cell_id)` pair from `request->snapshot`.
+    // 2. Look up the current pose of the chosen stock piece.
+    // 3. Look up the target board cell pose from `request->layout.cell_poses`.
+    // 4. Convert those TCP targets into `panda_link8` poses using
+    //    `link8_pose_from_tcp_target(...)`.
+    // 5. Call `compute_ik(...)` for the pick target and place target.
+    // 6. Build the four required trajectories:
+    //      - home_to_pick
+    //      - pick_to_home
+    //      - home_to_place
+    //      - place_to_home
+    // 7. Fill `response->plan` and set `response->accepted = true` on success.
+    //
+    // The fallback below intentionally rejects every turn. This keeps the
+    // starter repository buildable while making it clear that students must
+    // implement their own planner.
+    response->accepted = false;
+    response->message = "TODO(student): implement handle_plan_turn().";
   }
 
   static geometry_msgs::msg::Pose find_piece_pose(
       const ttt_interfaces::msg::GameSnapshot &snapshot,
-      const ttt_interfaces::msg::WorkspaceLayout &layout,
       uint8_t piece_id) {
-    for (const auto& piece : snapshot.pieces) {
-      if (piece.piece_id == piece_id) {
-        return piece.pose;
-      }
-    }
-    for (const auto& piece : layout.initial_pieces) {
-      if (piece.piece_id == piece_id) {
-        return piece.pose;
-      }
-    }
-    throw std::runtime_error("Piece not found");
+    // TODO(student): Search `snapshot.pieces` for the requested `piece_id` and
+    // return its pose. You may choose to throw an exception or return a
+    // fallback pose if the piece is missing.
+    (void)snapshot;
+    (void)piece_id;
+
+    // Dummy fallback to keep the starter code compilable.
+    geometry_msgs::msg::Pose fallback;
+    fallback.orientation.w = 1.0;
+    return fallback;
   }
 
   std::string player_name_;
