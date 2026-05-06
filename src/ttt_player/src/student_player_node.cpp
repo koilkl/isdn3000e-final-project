@@ -4,6 +4,7 @@
 #include <cmath>
 #include <functional>
 #include <future>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -11,6 +12,9 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
+
+#include <ament_index_cpp/get_package_share_directory.hpp>
+#include <torch/script.h>
 
 #include <geometry_msgs/msg/pose.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
@@ -106,8 +110,28 @@ class StudentPlayerNode : public rclcpp::Node {
     this->declare_parameter<std::string>("player_name", this->get_name());
     this->declare_parameter<std::string>("plan_turn_service", "/student_player/plan_turn");
 
+    // Use ament_index_cpp to find the model path relative to the installed package share directory
+    std::string default_model_path;
+    try {
+      std::string package_share_directory = ament_index_cpp::get_package_share_directory("ttt_player");
+      default_model_path = package_share_directory + "/resource/ttt_rl_model.pt";
+    } catch (const std::exception& e) {
+      RCLCPP_WARN(this->get_logger(), "Failed to get package share directory: %s", e.what());
+      default_model_path = "ttt_rl_model.pt"; // Fallback
+    }
+
+    this->declare_parameter<std::string>("model_path", default_model_path);
+
     player_name_ = this->get_parameter("player_name").as_string();
     plan_turn_service_ = this->get_parameter("plan_turn_service").as_string();
+    
+    std::string model_path = this->get_parameter("model_path").as_string();
+    try {
+      rl_model_ = torch::jit::load(model_path);
+      RCLCPP_INFO(this->get_logger(), "RL model loaded successfully from %s", model_path.c_str());
+    } catch (const c10::Error& e) {
+      RCLCPP_ERROR(this->get_logger(), "Error loading the RL model from %s", model_path.c_str());
+    }
 
     cb_group_ = this->create_callback_group(rclcpp::CallbackGroupType::Reentrant);
 
@@ -172,7 +196,18 @@ class StudentPlayerNode : public rclcpp::Node {
   std::optional<std::vector<double>> compute_ik(
       const geometry_msgs::msg::Pose &target_pose,
       const std::vector<double> &seed_positions) {
-
+    // TODO(student): Call the MoveIt `/compute_ik` service here.
+    // Suggested steps:
+    // 1. Create a `moveit_msgs::srv::GetPositionIK::Request`.
+    // 2. Set `group_name = "panda_arm"`.
+    // 3. Fill the seed joint state with the provided `seed_positions`.
+    // 4. Set the target pose in frame `panda_link0`.
+    // 5. Send the request through `ik_client_` and wait for the response.
+    // 6. Extract the 7 Panda arm joints from the solution and return them.
+    // 7. Return `std::nullopt` if IK times out or fails.
+    //
+    // The dummy return below keeps the starter code buildable, but it does not
+    // solve IK. Students should replace it with a real implementation.
     auto request = std::make_shared<moveit_msgs::srv::GetPositionIK::Request>();
     request->ik_request.group_name = "panda_arm";
     request->ik_request.robot_state.joint_state.name = panda_joint_names();
@@ -220,8 +255,27 @@ class StudentPlayerNode : public rclcpp::Node {
   // ----------------------------------------------------------------
 
   void handle_plan_turn(
+       // TODO(student): Implement your turn-planning logic here.
+    // Suggested structure:
+    // 1. Choose a legal `(piece_id, cell_id)` pair from `request->snapshot`.
+    // 2. Look up the current pose of the chosen stock piece.
+    // 3. Look up the target board cell pose from `request->layout.cell_poses`.
+    // 4. Convert those TCP targets into `panda_link8` poses using
+    //    `link8_pose_from_tcp_target(...)`.
+    // 5. Call `compute_ik(...)` for the pick target and place target.
+    // 6. Build the four required trajectories:
+    //      - home_to_pick
+    //      - pick_to_home
+    //      - home_to_place
+    //      - place_to_home
+    // 7. Fill `response->plan` and set `response->accepted = true` on success.
+    //
+    // The fallback below intentionally rejects every turn. This keeps the
+    // starter repository buildable while making it clear that students must
+    // implement their own planner.
       const std::shared_ptr<ttt_interfaces::srv::PlanTurn::Request> request,
-      std::shared_ptr<ttt_interfaces::srv::PlanTurn::Response> response) {
+      std::shared_ptr<ttt_interfaces::srv::PlanTurn::Response> response)
+       {
     if (request->player_id != player_id_) {
       response->accepted = false;
       response->message = "Plan request does not match registered player id.";
@@ -229,10 +283,41 @@ class StudentPlayerNode : public rclcpp::Node {
     }
 
     uint8_t target_cell_id = 255;
-    for (size_t i = 0; i < request->snapshot.legal_actions.size(); ++i) {
-      if (request->snapshot.legal_actions[i] == 1) {
-        target_cell_id = static_cast<uint8_t>(i);
-        break;
+    
+    // Convert board state to Tensor
+    std::vector<float> board_state(9, 0.0);
+    for (size_t i = 0; i < 9; ++i) {
+      board_state[i] = static_cast<float>(request->snapshot.board[i]);
+    }
+    torch::Tensor state_tensor = torch::from_blob(board_state.data(), {1, 9}).clone();
+
+    try {
+      // Model Inference
+      std::vector<torch::jit::IValue> inputs;
+      inputs.push_back(state_tensor);
+      torch::Tensor output = rl_model_.forward(inputs).toTensor();
+
+      // Action Selection with masking
+      float max_score = -std::numeric_limits<float>::infinity();
+      auto output_accessor = output.accessor<float, 2>();
+      for (size_t i = 0; i < 9; ++i) {
+        if (request->snapshot.legal_actions[i] == 1) {
+          float score = output_accessor[0][i];
+          if (score > max_score) {
+            max_score = score;
+            target_cell_id = static_cast<uint8_t>(i);
+          }
+        }
+      }
+      RCLCPP_INFO(this->get_logger(), "RL model selected cell %d", target_cell_id);
+    } catch (const std::exception& e) {
+      RCLCPP_ERROR(this->get_logger(), "RL model inference failed: %s. Falling back to first available cell.", e.what());
+      // Fallback
+      for (size_t i = 0; i < request->snapshot.legal_actions.size(); ++i) {
+        if (request->snapshot.legal_actions[i] == 1) {
+          target_cell_id = static_cast<uint8_t>(i);
+          break;
+        }
       }
     }
 
@@ -316,6 +401,8 @@ class StudentPlayerNode : public rclcpp::Node {
   bool registered_{false};
   bool registration_in_flight_{false};
   uint8_t player_id_{255};
+  
+  torch::jit::script::Module rl_model_;
 
   rclcpp::CallbackGroup::SharedPtr cb_group_;
   rclcpp::Client<ttt_interfaces::srv::RegisterPlayer>::SharedPtr register_client_;

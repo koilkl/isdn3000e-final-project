@@ -47,6 +47,7 @@ RUN apt-get update \
     && curl -L -o /tmp/ros2-apt-source.deb "https://github.com/ros-infrastructure/ros-apt-source/releases/download/${ROS_APT_SOURCE_VERSION}/ros2-apt-source_${ROS_APT_SOURCE_VERSION}.$(. /etc/os-release && echo ${UBUNTU_CODENAME:-${VERSION_CODENAME}})_all.deb" \
     && dpkg -i /tmp/ros2-apt-source.deb \
     && rm /tmp/ros2-apt-source.deb \
+    && apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 RUN apt-get update \
@@ -80,20 +81,25 @@ RUN apt-get update \
     ros-humble-moveit-simple-controller-manager \
     ros-humble-moveit-resources-panda-moveit-config \
     ros-humble-moveit-resources-panda-description \
-    ros-humble-gazebo-ros-pkgs \
-    ros-humble-gazebo-plugins \
-    ros-humble-gazebo-ros2-control \
+    \
+    # ros-humble-gazebo-ros-pkgs \
+    # ros-humble-gazebo-plugins \
+    # ros-humble-gazebo-ros2-control \
+    \
     mesa-utils \
     x11-apps \
     wget \
     && rm -rf /var/lib/apt/lists/*
+
 
 RUN python3 -m pip install --no-cache-dir \
     pettingzoo \
     pygame \
     robot_descriptions \
     viser \
-    yourdfpy
+    yourdfpy 
+# RUN pip3 uninstall -y torch torchvision torchaudio
+RUN pip3 install torch --index-url https://download.pytorch.org/whl/cpu
 
 RUN rosdep init \
     && rosdep fix-permissions \
@@ -115,7 +121,6 @@ RUN echo "source /opt/ros/humble/setup.bash" >> /etc/bash.bashrc \
     && echo "export XDG_RUNTIME_DIR=/tmp/runtime-${USERNAME}" >> /etc/bash.bashrc
 
 ENV DEBIAN_FRONTEND=dialog
-
 USER ${USERNAME}
 WORKDIR ${WORKSPACE_DIR}
 CMD ["/bin/bash"]
