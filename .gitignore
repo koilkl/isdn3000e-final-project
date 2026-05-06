@@ -18,3 +18,4 @@ __pycache__/
 
 # Verification artifacts
 artifacts/
+/.vscode
