@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 import math
+import os
 import subprocess
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,7 +16,7 @@ from moveit_msgs.msg import RobotState as MoveItRobotState
 from moveit_msgs.srv import GetPositionIK
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
-from robot_descriptions.loaders.yourdfpy import load_robot_description
+from yourdfpy import URDF
 
 from ttt_layout import load_layout
 
@@ -104,12 +106,37 @@ def build_audit_targets() -> list[AuditTarget]:
 
 
 def load_panda_urdf():
-    return load_robot_description(
-        "panda_description",
-        load_meshes=True,
-        build_scene_graph=True,
-        load_collision_meshes=False,
+    try:
+        from ament_index_python.packages import get_package_share_directory
+
+        share_dir = get_package_share_directory("moveit_resources_panda_description")
+    except Exception:
+        share_dir = "/opt/ros/humble/share/moveit_resources_panda_description"
+
+    urdf_path = os.path.join(share_dir, "urdf", "panda.urdf")
+    with open(urdf_path, "r", encoding="utf-8") as f:
+        urdf_text = f.read()
+
+    urdf_text = urdf_text.replace(
+        "package://moveit_resources_panda_description/", f"{share_dir}/"
     )
+
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".urdf", delete=False, encoding="utf-8"
+        ) as f:
+            f.write(urdf_text)
+            tmp_path = f.name
+        return URDF.load(
+            tmp_path,
+            load_meshes=True,
+            build_scene_graph=True,
+            load_collision_meshes=False,
+        )
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
 
 
 def _arm_cfg_map(joint_positions: tuple[float, ...] | list[float]) -> dict[str, float]:

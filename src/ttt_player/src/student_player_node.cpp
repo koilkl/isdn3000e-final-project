@@ -14,7 +14,9 @@
 #include <vector>
 
 #include <ament_index_cpp/get_package_share_directory.hpp>
+#if defined(TTT_PLAYER_HAS_TORCH)
 #include <torch/script.h>
+#endif
 
 #include <geometry_msgs/msg/pose.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
@@ -102,6 +104,73 @@ moveit_msgs::msg::RobotTrajectory make_three_point_trajectory(
   return trajectory;
 }
 
+std::optional<uint8_t> choose_cell_rule_based(
+    const ttt_interfaces::msg::GameSnapshot &snapshot,
+    uint8_t player_id) {
+  const auto my_mark = player_id == 0 ? ttt_interfaces::msg::GameSnapshot::PLAYER_0
+                                      : ttt_interfaces::msg::GameSnapshot::PLAYER_1;
+  const auto opp_mark = player_id == 0 ? ttt_interfaces::msg::GameSnapshot::PLAYER_1
+                                       : ttt_interfaces::msg::GameSnapshot::PLAYER_0;
+
+  auto is_legal = [&](uint8_t cell) {
+    return cell < snapshot.legal_actions.size() && snapshot.legal_actions[cell] == 1;
+  };
+
+  auto would_win = [&](uint8_t mark, uint8_t cell) {
+    if (!is_legal(cell)) {
+      return false;
+    }
+    std::array<uint8_t, 9> board = snapshot.board;
+    board[cell] = mark;
+    constexpr std::array<std::array<uint8_t, 3>, 8> lines = {{{{0, 1, 2}},
+                                                              {{3, 4, 5}},
+                                                              {{6, 7, 8}},
+                                                              {{0, 3, 6}},
+                                                              {{1, 4, 7}},
+                                                              {{2, 5, 8}},
+                                                              {{0, 4, 8}},
+                                                              {{2, 4, 6}}}};
+    for (const auto &line : lines) {
+      if (board[line[0]] == mark && board[line[1]] == mark && board[line[2]] == mark) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  for (uint8_t cell = 0; cell < 9; ++cell) {
+    if (would_win(my_mark, cell)) {
+      return cell;
+    }
+  }
+
+  for (uint8_t cell = 0; cell < 9; ++cell) {
+    if (would_win(opp_mark, cell)) {
+      return cell;
+    }
+  }
+
+  if (is_legal(4)) {
+    return 4;
+  }
+
+  constexpr std::array<uint8_t, 4> corners = {0, 2, 6, 8};
+  for (auto cell : corners) {
+    if (is_legal(cell)) {
+      return cell;
+    }
+  }
+
+  constexpr std::array<uint8_t, 4> edges = {1, 3, 5, 7};
+  for (auto cell : edges) {
+    if (is_legal(cell)) {
+      return cell;
+    }
+  }
+
+  return std::nullopt;
+}
+
 }  // namespace
 
 class StudentPlayerNode : public rclcpp::Node {
@@ -125,13 +194,19 @@ class StudentPlayerNode : public rclcpp::Node {
     player_name_ = this->get_parameter("player_name").as_string();
     plan_turn_service_ = this->get_parameter("plan_turn_service").as_string();
     
+#if defined(TTT_PLAYER_HAS_TORCH)
     std::string model_path = this->get_parameter("model_path").as_string();
     try {
       rl_model_ = torch::jit::load(model_path);
+      rl_model_loaded_ = true;
       RCLCPP_INFO(this->get_logger(), "RL model loaded successfully from %s", model_path.c_str());
-    } catch (const c10::Error& e) {
-      RCLCPP_ERROR(this->get_logger(), "Error loading the RL model from %s", model_path.c_str());
+    } catch (const c10::Error &e) {
+      rl_model_loaded_ = false;
+      RCLCPP_ERROR(this->get_logger(), "Error loading the RL model from %s: %s", model_path.c_str(), e.what());
     }
+#else
+    RCLCPP_INFO(this->get_logger(), "Built without torch support. Using rule-based policy.");
+#endif
 
     cb_group_ = this->create_callback_group(rclcpp::CallbackGroupType::Reentrant);
 
@@ -283,40 +358,48 @@ class StudentPlayerNode : public rclcpp::Node {
     }
 
     uint8_t target_cell_id = 255;
-    
-    // Convert board state to Tensor
-    std::vector<float> board_state(9, 0.0);
-    for (size_t i = 0; i < 9; ++i) {
-      board_state[i] = static_cast<float>(request->snapshot.board[i]);
-    }
-    torch::Tensor state_tensor = torch::from_blob(board_state.data(), {1, 9}).clone();
 
-    try {
-      // Model Inference
-      std::vector<torch::jit::IValue> inputs;
-      inputs.push_back(state_tensor);
-      torch::Tensor output = rl_model_.forward(inputs).toTensor();
-
-      // Action Selection with masking
-      float max_score = -std::numeric_limits<float>::infinity();
-      auto output_accessor = output.accessor<float, 2>();
+#if defined(TTT_PLAYER_HAS_TORCH)
+    if (rl_model_loaded_) {
+      std::vector<float> board_state(9, 0.0F);
       for (size_t i = 0; i < 9; ++i) {
-        if (request->snapshot.legal_actions[i] == 1) {
-          float score = output_accessor[0][i];
-          if (score > max_score) {
-            max_score = score;
-            target_cell_id = static_cast<uint8_t>(i);
+        board_state[i] = static_cast<float>(request->snapshot.board[i]);
+      }
+      torch::Tensor state_tensor = torch::from_blob(board_state.data(), {1, 9}, torch::kFloat32).clone();
+
+      try {
+        std::vector<torch::jit::IValue> inputs;
+        inputs.push_back(state_tensor);
+        torch::Tensor output = rl_model_.forward(inputs).toTensor();
+
+        float max_score = -std::numeric_limits<float>::infinity();
+        auto output_accessor = output.accessor<float, 2>();
+        for (size_t i = 0; i < 9; ++i) {
+          if (request->snapshot.legal_actions[i] == 1) {
+            float score = output_accessor[0][i];
+            if (score > max_score) {
+              max_score = score;
+              target_cell_id = static_cast<uint8_t>(i);
+            }
           }
         }
+        RCLCPP_INFO(this->get_logger(), "RL model selected cell %d", target_cell_id);
+      } catch (const std::exception &e) {
+        RCLCPP_ERROR(this->get_logger(), "RL model inference failed: %s", e.what());
       }
-      RCLCPP_INFO(this->get_logger(), "RL model selected cell %d", target_cell_id);
-    } catch (const std::exception& e) {
-      RCLCPP_ERROR(this->get_logger(), "RL model inference failed: %s. Falling back to first available cell.", e.what());
-      // Fallback
-      for (size_t i = 0; i < request->snapshot.legal_actions.size(); ++i) {
-        if (request->snapshot.legal_actions[i] == 1) {
-          target_cell_id = static_cast<uint8_t>(i);
-          break;
+    }
+#endif
+
+    if (target_cell_id == 255) {
+      const auto cell = choose_cell_rule_based(request->snapshot, player_id_);
+      if (cell) {
+        target_cell_id = *cell;
+      } else {
+        for (size_t i = 0; i < request->snapshot.legal_actions.size(); ++i) {
+          if (request->snapshot.legal_actions[i] == 1) {
+            target_cell_id = static_cast<uint8_t>(i);
+            break;
+          }
         }
       }
     }
@@ -401,8 +484,11 @@ class StudentPlayerNode : public rclcpp::Node {
   bool registered_{false};
   bool registration_in_flight_{false};
   uint8_t player_id_{255};
-  
+
+#if defined(TTT_PLAYER_HAS_TORCH)
   torch::jit::script::Module rl_model_;
+  bool rl_model_loaded_{false};
+#endif
 
   rclcpp::CallbackGroup::SharedPtr cb_group_;
   rclcpp::Client<ttt_interfaces::srv::RegisterPlayer>::SharedPtr register_client_;
