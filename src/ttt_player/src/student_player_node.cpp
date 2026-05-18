@@ -171,6 +171,55 @@ std::optional<uint8_t> choose_cell_rule_based(
   return std::nullopt;
 }
 
+std::optional<uint8_t> choose_cell_win_or_block(
+    const ttt_interfaces::msg::GameSnapshot &snapshot,
+    uint8_t player_id) {
+  const auto my_mark = player_id == 0 ? ttt_interfaces::msg::GameSnapshot::PLAYER_0
+                                      : ttt_interfaces::msg::GameSnapshot::PLAYER_1;
+  const auto opp_mark = player_id == 0 ? ttt_interfaces::msg::GameSnapshot::PLAYER_1
+                                       : ttt_interfaces::msg::GameSnapshot::PLAYER_0;
+
+  auto is_legal = [&](uint8_t cell) {
+    return cell < snapshot.legal_actions.size() && snapshot.legal_actions[cell] == 1;
+  };
+
+  auto would_win = [&](uint8_t mark, uint8_t cell) {
+    if (!is_legal(cell)) {
+      return false;
+    }
+    std::array<uint8_t, 9> board = snapshot.board;
+    board[cell] = mark;
+    constexpr std::array<std::array<uint8_t, 3>, 8> lines = {{{{0, 1, 2}},
+                                                              {{3, 4, 5}},
+                                                              {{6, 7, 8}},
+                                                              {{0, 3, 6}},
+                                                              {{1, 4, 7}},
+                                                              {{2, 5, 8}},
+                                                              {{0, 4, 8}},
+                                                              {{2, 4, 6}}}};
+    for (const auto &line : lines) {
+      if (board[line[0]] == mark && board[line[1]] == mark && board[line[2]] == mark) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  for (uint8_t cell = 0; cell < 9; ++cell) {
+    if (would_win(my_mark, cell)) {
+      return cell;
+    }
+  }
+
+  for (uint8_t cell = 0; cell < 9; ++cell) {
+    if (would_win(opp_mark, cell)) {
+      return cell;
+    }
+  }
+
+  return std::nullopt;
+}
+
 }  // namespace
 
 class StudentPlayerNode : public rclcpp::Node {
@@ -359,11 +408,29 @@ class StudentPlayerNode : public rclcpp::Node {
 
     uint8_t target_cell_id = 255;
 
+    const auto tactical_cell = choose_cell_win_or_block(request->snapshot, player_id_);
+    if (tactical_cell) {
+      target_cell_id = *tactical_cell;
+      RCLCPP_INFO(this->get_logger(), "Tactical move selected cell %u", target_cell_id);
+    }
+
 #if defined(TTT_PLAYER_HAS_TORCH)
-    if (rl_model_loaded_) {
+    if (target_cell_id == 255 && rl_model_loaded_) {
       std::vector<float> board_state(9, 0.0F);
+      const uint8_t my_mark = player_id_ == 0 ? ttt_interfaces::msg::GameSnapshot::PLAYER_0
+                                             : ttt_interfaces::msg::GameSnapshot::PLAYER_1;
+      const uint8_t opp_mark = player_id_ == 0 ? ttt_interfaces::msg::GameSnapshot::PLAYER_1
+                                              : ttt_interfaces::msg::GameSnapshot::PLAYER_0;
+
       for (size_t i = 0; i < 9; ++i) {
-        board_state[i] = static_cast<float>(request->snapshot.board[i]);
+        const uint8_t v = request->snapshot.board[i];
+        if (v == my_mark) {
+          board_state[i] = 1.0F;
+        } else if (v == opp_mark) {
+          board_state[i] = -1.0F;
+        } else {
+          board_state[i] = 0.0F;
+        }
       }
       torch::Tensor state_tensor = torch::from_blob(board_state.data(), {1, 9}, torch::kFloat32).clone();
 
