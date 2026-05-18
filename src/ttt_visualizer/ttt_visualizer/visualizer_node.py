@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import copy
-import os
 import re
-import tempfile
 import threading
 
 import numpy as np
@@ -11,8 +9,8 @@ import rclpy
 import viser
 from geometry_msgs.msg import Pose
 from rclpy.node import Node
+from robot_descriptions.loaders.yourdfpy import load_robot_description
 from viser.extras import ViserUrdf
-from yourdfpy import URDF
 
 from ttt_interfaces.msg import GameSnapshot, TurnPlan
 from ttt_layout import load_layout
@@ -35,42 +33,6 @@ FINGER_JOINTS = {
     "panda_finger_joint1": 0.025,
     "panda_finger_joint2": 0.025,
 }
-
-LINK8_TCP_Z_OFFSET = 0.1034
-
-
-def _load_panda_urdf(load_meshes: bool, build_scene_graph: bool) -> URDF:
-    try:
-        from ament_index_python.packages import get_package_share_directory
-
-        share_dir = get_package_share_directory("moveit_resources_panda_description")
-    except Exception:
-        share_dir = "/opt/ros/humble/share/moveit_resources_panda_description"
-
-    urdf_path = os.path.join(share_dir, "urdf", "panda.urdf")
-    with open(urdf_path, "r", encoding="utf-8") as f:
-        urdf_text = f.read()
-
-    urdf_text = urdf_text.replace(
-        "package://moveit_resources_panda_description/", f"{share_dir}/"
-    )
-
-    tmp_path = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".urdf", delete=False, encoding="utf-8"
-        ) as f:
-            f.write(urdf_text)
-            tmp_path = f.name
-        return URDF.load(
-            tmp_path,
-            load_meshes=load_meshes,
-            build_scene_graph=build_scene_graph,
-            load_collision_meshes=False,
-        )
-    finally:
-        if tmp_path and os.path.exists(tmp_path):
-            os.unlink(tmp_path)
 
 
 class TicTacToeVisualizerNode(Node):
@@ -95,7 +57,12 @@ class TicTacToeVisualizerNode(Node):
         self.user_has_interacted = False
         self.syncing_gui = False
 
-        urdf = _load_panda_urdf(load_meshes=True, build_scene_graph=True)
+        urdf = load_robot_description(
+            "panda_description",
+            load_meshes=True,
+            build_scene_graph=True,
+            load_collision_meshes=False,
+        )
         self.urdf = urdf
         self.viser_urdf = ViserUrdf(self.server, urdf_or_path=urdf, load_meshes=True)
         self.actuated_joint_names = list(
@@ -495,13 +462,7 @@ class TicTacToeVisualizerNode(Node):
 
     def _tcp_pose(self, cfg: np.ndarray) -> Pose:
         self.urdf.update_cfg(cfg)
-        try:
-            transform = np.array(self.urdf.get_transform("panda_hand_tcp"), dtype=float)
-        except ValueError:
-            link8 = np.array(self.urdf.get_transform("panda_link8"), dtype=float)
-            link8_to_tcp = np.eye(4, dtype=float)
-            link8_to_tcp[2, 3] = LINK8_TCP_Z_OFFSET
-            transform = link8 @ link8_to_tcp
+        transform = np.array(self.urdf.get_transform("panda_hand_tcp"), dtype=float)
         orientation = self._rotation_matrix_to_xyzw(transform[:3, :3])
         pose = Pose()
         pose.position.x = float(transform[0, 3])

@@ -1,13 +1,10 @@
 from __future__ import annotations
 
-import os
-import tempfile
-
 import numpy as np
 from moveit_msgs.msg import RobotTrajectory
 import rclpy
 from rclpy.node import Node
-from yourdfpy import URDF
+from robot_descriptions.loaders.yourdfpy import load_robot_description
 
 from ttt_interfaces.msg import ExecutionResult
 from ttt_interfaces.srv import ReviewTurn
@@ -19,42 +16,6 @@ FINGER_JOINTS = {
     "panda_finger_joint2": 0.04,
 }
 
-LINK8_TCP_Z_OFFSET = 0.1034
-
-
-def _load_panda_urdf(load_meshes: bool, build_scene_graph: bool) -> URDF:
-    try:
-        from ament_index_python.packages import get_package_share_directory
-
-        share_dir = get_package_share_directory("moveit_resources_panda_description")
-    except Exception:
-        share_dir = "/opt/ros/humble/share/moveit_resources_panda_description"
-
-    urdf_path = os.path.join(share_dir, "urdf", "panda.urdf")
-    with open(urdf_path, "r", encoding="utf-8") as f:
-        urdf_text = f.read()
-
-    urdf_text = urdf_text.replace(
-        "package://moveit_resources_panda_description/", f"{share_dir}/"
-    )
-
-    tmp_path = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".urdf", delete=False, encoding="utf-8"
-        ) as f:
-            f.write(urdf_text)
-            tmp_path = f.name
-        return URDF.load(
-            tmp_path,
-            load_meshes=load_meshes,
-            build_scene_graph=build_scene_graph,
-            load_collision_meshes=False,
-        )
-    finally:
-        if tmp_path and os.path.exists(tmp_path):
-            os.unlink(tmp_path)
-
 
 class TicTacToeRefereeNode(Node):
     def __init__(self) -> None:
@@ -63,7 +24,12 @@ class TicTacToeRefereeNode(Node):
         self.endpoint_position_tolerance = float(
             self.get_parameter("endpoint_position_tolerance").value
         )
-        self.urdf = _load_panda_urdf(load_meshes=False, build_scene_graph=True)
+        self.urdf = load_robot_description(
+            "panda_description",
+            load_meshes=False,
+            build_scene_graph=True,
+            load_collision_meshes=False,
+        )
         self.review_srv = self.create_service(
             ReviewTurn, "/ttt/review_turn", self._on_review
         )
@@ -207,16 +173,7 @@ class TicTacToeRefereeNode(Node):
         cfg = {name: float(value) for name, value in zip(joint_names, positions)}
         cfg.update(FINGER_JOINTS)
         self.urdf.update_cfg(cfg)
-        try:
-            return np.array(self.urdf.get_transform(ee_frame)[:3, 3], dtype=float)
-        except ValueError:
-            if ee_frame != "panda_hand_tcp":
-                raise
-            base_to_link8 = self.urdf.get_transform("panda_link8")
-            link8_to_tcp = np.eye(4, dtype=float)
-            link8_to_tcp[2, 3] = LINK8_TCP_Z_OFFSET
-            base_to_tcp = base_to_link8 @ link8_to_tcp
-            return np.array(base_to_tcp[:3, 3], dtype=float)
+        return np.array(self.urdf.get_transform(ee_frame)[:3, 3], dtype=float)
 
 
 def main(args=None) -> None:
